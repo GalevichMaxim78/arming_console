@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include "load_driver.h"
 #include "button_fsm.h"
@@ -8,6 +9,11 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+
+void get_storage();
+void set_storage();
 
 static const char *TAG = "arming_console";
 
@@ -130,6 +136,7 @@ static void handle_arm_button(button_event_t ev, uint32_t now_ms)
             s_zones[i].bypassed = false;
             s_zones[i].tripped = false;
         }
+        set_storage();
         s_panic_latched = false;
         sys_transition(SYS_DISARMED, now_ms);
         load_relay_set(false); load_buzzer_set(false);
@@ -154,6 +161,7 @@ static void handle_zone_button(int zone_idx, button_event_t ev)
     else if (ev == BTN_EVENT_LONG_PRESS)
     {
         z->bypassed = !z->bypassed;
+        set_storage();
         request_chirp(z->bypassed ? 150 : 50);
         ESP_LOGW(TAG, "%s: bypass %s", z->name, z->bypassed ? "УВІМКНЕНО" : "ВИМКНЕНО");
     }
@@ -275,8 +283,73 @@ static void arming_beep_task(void *arg)
         else
         {
             vTaskDelay(pdMS_TO_TICKS(100));// не ARMING — просто чекаємо, нічого не робимо
+
         }
     }
+}
+
+void get_storage()
+{
+    nvs_handle_t my_handle;
+     esp_err_t ret = nvs_open("storage", NVS_READWRITE, &my_handle);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE("NVS", "Ошибка открытия NVS-дескриптора (%s)", esp_err_to_name(ret));
+    }
+    else
+    {
+        for(uint8_t i = 1; i <= N_ZONES; ++i)
+        {
+            uint8_t bypassed = 0; // значение по умолчанию
+            char buffer[50];
+            snprintf(buffer, sizeof(buffer), "bypassed_zone%d", i);
+            ret = nvs_get_u8(my_handle, buffer, &bypassed);
+            if (ret != ESP_OK)
+            {
+                ESP_LOGE("NVS", "Ошибка чтения NVS-дескриптора (%s)", esp_err_to_name(ret));
+            }
+            else
+            {
+                ESP_LOGI("NVS", " Zone: %d Bypassed(%d)", i, bypassed);
+                s_zones[i-1].bypassed = (bool)bypassed;
+            }
+        }
+    }
+
+    nvs_close(my_handle);
+}
+
+void set_storage()
+{
+    nvs_handle_t my_handle;
+    esp_err_t ret = nvs_open("storage", NVS_READWRITE, &my_handle);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE("NVS", "Ошибка открытия NVS-дескриптора (%s)", esp_err_to_name(ret));
+    }
+    else
+    {
+        for(uint8_t i = 1; i <= N_ZONES; ++i)
+        {
+            char buffer[50];
+            snprintf(buffer, sizeof(buffer), "bypassed_zone%d", i);
+            uint8_t value = s_zones[i-1].bypassed ? 1 : 0;
+            ret = nvs_set_u8(my_handle, buffer, value);
+            if (ret == ESP_OK)
+            {
+                ESP_LOGI("NVS", "Запись NVS-дескриптора (%s) : %d", buffer, value);
+            }
+            else
+            {
+                ESP_LOGE("NVS", "Ошибка записи NVS-дескриптора (%s)", esp_err_to_name(ret));
+                nvs_close(my_handle);
+                return;
+            }
+        }
+    }
+
+    nvs_commit(my_handle);
+    nvs_close(my_handle);
 }
 
 void app_main()
@@ -285,6 +358,16 @@ void app_main()
     button_fsm_init(&s_buttons[IDX_ARM], GPIO_NUM_4);
     button_fsm_init(&s_buttons[IDX_ZONE1], GPIO_NUM_5);
     button_fsm_init(&s_buttons[IDX_ZONE2], GPIO_NUM_6);
+
+     esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    get_storage();
 
     panic_sensor_init(on_panic_deferred);
     pot_sensor_init();
